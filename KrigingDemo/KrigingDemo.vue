@@ -3,19 +3,18 @@
     <div ref="container" id="container"></div>
   </div>
 </template>
+
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import * as Cesium from 'cesium'
 import { init } from './index'
 
 const container = ref<HTMLDivElement>()
 
-let viewer: Cesium.Viewer
-
 onMounted(() => {
-  viewer = init(container.value as HTMLDivElement)
+  init(container.value!)
 })
 </script>
+
 <style lang="scss" scoped>
 #analysis {
   position: relative;
