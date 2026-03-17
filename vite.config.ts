@@ -30,8 +30,8 @@ function fixCesiumBase(base: string): Plugin {
 
 const BASE = '/KrigingTS/'
 
-export default defineConfig(({ command }) => ({
-  base: command === 'build' ? BASE : '/',
+export default defineConfig({
+  base: BASE,
   plugins: [
     vue(),
     cesium(),
@@ -42,4 +42,4 @@ export default defineConfig(({ command }) => ({
       '@': '/src'
     }
   }
-}))
+})
