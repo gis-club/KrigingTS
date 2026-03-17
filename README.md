@@ -1,101 +1,98 @@
-# cesium heatmap ts
+# KrigingTS
 
-## Project description
+kriging.js 的 TypeScript 版本，用于空间插值计算，可配合 Cesium 实现等值面可视化。
+
+原始 kriging.js：https://github.com/oeo4b/kriging.js
+
+## 快速开始
+
+```bash
+npm install
+npm run dev
 ```
-该库是对开源的kriging 进行的ts版本的编写，没对做其他的改动
-原始kriging 的地址 https://github.com/oeo4b/kriging.js
+
+访问 `http://localhost:5173/` 查看 Cesium 等值面 Demo。
+
+## 项目结构
+
+```
+├── kriging.ts              # 克里金插值 TypeScript 实现
+├── kriging_fast.js         # 克里金插值 JavaScript 实现
+├── global.d.ts             # Array 扩展方法类型声明
+├── KrigingDemo/            # Cesium 等值面示例
+│   ├── KrigingDemo.vue     # Vue 组件
+│   └── index.ts            # 初始化与插值逻辑
+├── public/                 # 示例数据
+│   ├── cezhan.json         # 测站点数据
+│   └── tianjin_line_1.json # 区域边界数据
+└── src/                    # Vue 应用入口
+    ├── main.ts
+    └── App.vue
 ```
 
-## using
-```
-/**
- * @description: 等值面创建
- * @param {KrigingClass} kriging 克里金对象
- * @param {Array} lngs 经度集合
- * @param {Array} lats 纬度集合
- * @param {Array} siteValue 数值集合
- * @return {*}
- */
-const isosurfaces = (kriging: KrigingClass,lngs: Array<number>,lats: Array<number>,siteValue: Array<number>) => {
-  const colors = [
-    { min: 0, max: 0.1, color: '#FFFFFF' },
-    { min: 0.2, max: 10, color: '#A7F290' },
-    { min: 11, max: 25, color: '#3CBB3C' },
-    { min: 26, max: 50, color: '#61B8FF' },
-    { min: 51, max: 100, color: '#0000E1' },
-    { min: 101, max: 150, color: '#FA01FA' },
-    { min: 151, max: 250, color: '#800040' },
-    { min: 251, max: 999, color: '#3F001C' }
-  ]
+## 使用方式
 
-  // 如果存在雨量图则删除雨量图
-  const KrigingRain = viewer.entities.getById('KrigingRain')
-  viewer.entities.remove(KrigingRain)
+```typescript
+import KrigingClass from './kriging'
 
-  // 绘制面的所有点
-  const coords = [] as number[]
-  jsonData.geometries[0].coordinates[0].forEach((item:Array<number>) => {
-    coords.push(item[0])
-    coords.push(item[1])
-  })
+const kriging = new KrigingClass()
 
-  // 绘制面的jeojson
-  const ex = jsonData.geometries[0].coordinates
+// 1. 训练 variogram 对象
+const variogram = kriging.train(siteValue, lngs, lats, 'spherical', 0, 200)
 
-  const extent = Cesium.PolygonGeometry.computeRectangle({
-    polygonHierarchy: new Cesium.PolygonHierarchy(
-      Cesium.Cartesian3.fromDegreesArray(coords)
-    )
-  }) // 范围（弧度）
+// 2. 生成格网预测值
+const grid = kriging.grid(polygons, variogram, (maxy - miny) / 1000)
 
-  const minx = Cesium.Math.toDegrees(extent.west) // 转换为经纬度
-  const miny = Cesium.Math.toDegrees(extent.south)
-  const maxx = Cesium.Math.toDegrees(extent.east)
-  const maxy = Cesium.Math.toDegrees(extent.north)
-
-  let canvas = null // 画布
-
-  // 1.用克里金训练一个variogram对象
-  const variogram = kriging.train(siteValue, lngs, lats, 'spherical', 0, 200)
-  // 2.使用刚才的variogram对象使polygons描述的地理位置内的格网元素具备不一样的预测值；
-  const grid = kriging.grid(ex, variogram, (maxy - miny) / 1000)
-
-  canvas = document.createElement('canvas')
-  canvas.width = 2000
-  canvas.height = 2000
-  canvas.style.display = 'block'
-  // 3.将得到的格网预测值渲染到canvas画布上
-
-  if (grid) {
-    kriging.plot(canvas, grid, [minx, maxx], [miny, maxy], colors)
-  }
-
-  if (canvas != null) {
-    viewer.entities.add({
-      id: 'KrigingRain',
-      polygon: {
-        show: true,
-        clampToGround: true,
-        hierarchy: {
-          positions: Cesium.Cartesian3.fromDegreesArray(coords)
-        },
-        material: new Cesium.ImageMaterialProperty({
-          // 使用贴图的方式将结果贴到面上
-          image: canvas,
-          transparent: true,
-          color: Cesium.Color.WHITE.withAlpha(0.7)
-        })
-      }
-    })
-  }
-  return viewer.entities.getById('KrigingRain')
+// 3. 渲染到 canvas
+const canvas = document.createElement('canvas')
+canvas.width = 2000
+canvas.height = 2000
+if (grid) {
+  kriging.plot(canvas, grid, [minx, maxx], [miny, maxy], colors)
 }
 
-其中jsonData为GeoJson，根据个人数据进行上述方法的读取插值范围的的代码修改
-
+// 4. 贴图到 Cesium Entity
+viewer.entities.add({
+  id: 'KrigingRain',
+  polygon: {
+    show: true,
+    clampToGround: true,
+    hierarchy: {
+      positions: Cesium.Cartesian3.fromDegreesArray(coords)
+    },
+    material: new Cesium.ImageMaterialProperty({
+      image: canvas,
+      transparent: true,
+      color: Cesium.Color.WHITE.withAlpha(0.7)
+    })
+  }
+})
 ```
 
-### expectation
+### 参数说明
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `siteValue` | `number[]` | 站点观测值 |
+| `lngs` | `number[]` | 站点经度集合 |
+| `lats` | `number[]` | 站点纬度集合 |
+| `model` | `string` | 变差函数模型：`gaussian` / `exponential` / `spherical` |
+| `sigma2` | `number` | 噪声方差 |
+| `alpha` | `number` | 正则化参数 |
+| `polygons` | `number[][][]` | 插值区域多边形坐标 |
+| `width` | `number` | 格网分辨率 |
+| `colors` | `{min, max, color}[]` | 色阶映射表 |
+
+## 命令
+
+```bash
+npm run dev      # 启动开发服务器
+npm run build    # 生产构建
+npm run preview  # 预览构建产物
 ```
-后续有空再来优化该代码，进行更灵活的使用
-```
+
+## GitHub Pages
+
+推送到 `master` 分支后，GitHub Actions 会自动构建并部署到 GitHub Pages。
+
+在线访问：https://gis-club.github.io/KrigingTS/
