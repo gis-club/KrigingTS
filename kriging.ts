@@ -1,5 +1,9 @@
 /* eslint no-extend-native: ["error", { "exceptions": ["Array"] }] */
-// Extend the Array class
+
+/**
+ * 扩展 Array 原型，添加 kriging 算法依赖的工具方法。
+ * 这些方法在 grid() 中被隐式调用（如 polygons[i].pip()、variogram.t.min()）。
+ */
 Array.prototype.max = function () {
   return Math.max.apply(null, this)
 }
@@ -11,6 +15,11 @@ Array.prototype.mean = function () {
   for (i = 0, sum = 0; i < this.length; i++) sum += this[i]
   return sum / this.length
 }
+/**
+ * Point-in-Polygon（射线法）
+ * 从点 (x, y) 向右发射一条射线，统计与多边形边的交叉次数，奇数次则在内部。
+ * this 为 [[x0,y0], [x1,y1], ...] 形式的多边形顶点数组。
+ */
 Array.prototype.pip = function (x, y) {
   let i
   let j
@@ -29,31 +38,59 @@ Array.prototype.pip = function (x, y) {
   return c
 }
 
+// ======================== 接口定义 ========================
+
+/** 网格计算结果 */
 interface IGrid {
+  /** 二维数组 list[col][row]，存储每个格网点的预测值（undefined 表示在多边形外） */
   list: Array<Array<number>>;
+  /** X 轴（经度）范围 [min, max] */
   xlim: Array<number>;
+  /** Y 轴（纬度）范围 [min, max] */
   ylim: Array<number>;
+  /** Z 轴（观测值）范围 [min, max] */
   zlim: Array<number>;
+  /** 格网单元宽度（与输入 width 一致） */
   width: number;
 }
 
+/** 色阶映射项 */
 interface IColor {
   min: number;
   max: number;
   color: string;
 }
 
+// ======================== 变差函数类 ========================
+
+/**
+ * VariogramClass —— 变差函数（Variogram）参数容器与模型计算。
+ *
+ * 变差函数描述空间相关性随距离衰减的规律，是 Kriging 的核心。
+ * 支持三种理论模型：高斯（gaussian）、指数（exponential）、球面（spherical）。
+ */
 class VariogramClass {
+  /** 观测值数组（z 值） */
   t: number[];
+  /** 观测点 X 坐标（经度） */
   x: number[];
+  /** 观测点 Y 坐标（纬度） */
   y: number[];
+  /** 块金值（nugget）：距离为 0 时的半方差，反映微尺度变异和测量误差 */
   nugget: number;
+  /** 变程（range）：空间相关性消失的距离阈值 */
   range: number;
+  /** 基台值（sill）：半方差趋于稳定的上限值 */
   sill: number;
+  /** 模型平滑系数，默认 1/3 */
   A: number;
+  /** 观测点数量 */
   n: number;
+  /** 逆 Gram 矩阵（n×n 展平为一维），用于预测时计算权重 */
   K: number[];
+  /** 预测权重向量（n×1），M = K⁻¹ · t */
   M: number[];
+  /** 模型类型标识：'gaussian' | 'exponential' | 'spherical' */
   model: string;
 
   constructor (
@@ -75,7 +112,7 @@ class VariogramClass {
     this.model = model
   }
 
-  // Variogram models(变差函数模型)
+  /** 高斯变差函数模型：γ(h) = c0 + (c - c0)/a · (1 - exp(-(1/A)·(h/a)²)) */
   krigingVariogramGaussian (
     h: number,
     nugget: number,
@@ -90,6 +127,7 @@ class VariogramClass {
     )
   }
 
+  /** 指数变差函数模型：γ(h) = c0 + (c - c0)/a · (1 - exp(-(1/A)·(h/a))) */
   krigingVariogramExponential (
     h: number,
     nugget: number,
@@ -103,6 +141,7 @@ class VariogramClass {
     )
   }
 
+  /** 球面变差函数模型：γ(h) = c0 + (c - c0)/a · (1.5·(h/a) - 0.5·(h/a)³)，h > a 时取基台值 */
   krigingVariogramSpherical (
     h: number,
     nugget: number,
@@ -117,6 +156,7 @@ class VariogramClass {
     )
   }
 
+  /** 根据 model 类型分派调用对应的变差函数模型 */
   judgeType (h: number, nugget: number, range: number, sill: number, A: number) {
     switch (this.model) {
       case 'gaussian':
@@ -131,7 +171,22 @@ class VariogramClass {
   }
 }
 
+// ======================== 克里金主类 ========================
+
+/**
+ * KrigingClass —— 克里金空间插值算法。
+ *
+ * 使用流程：
+ *   1. train()   —— 根据观测数据拟合变差函数，构建 Gram 矩阵
+ *   2. grid()    —— 在多边形区域内按网格逐点预测，使用射线法做 PIP 检测
+ *   3. rasterGrid() —— 同 grid()，但使用 Canvas 位图做 PIP 检测，速度更快
+ *   4. plot()    —— 将网格预测值渲染到 Canvas 画布上
+ */
 export default class KrigingClass {
+
+  // ==================== 工具方法 ====================
+
+  /** 创建长度为 n、每个元素均为 value 的数组 */
   createArrayWithValues = (value: number, n: number) => {
     const array = []
     for (let i = 0; i < n; i++) {
@@ -140,13 +195,17 @@ export default class KrigingClass {
     return array
   };
 
-  // Matrix algebra(矩阵代数)
+  // ==================== 矩阵运算 ====================
+  // Kriging 核心依赖线性代数运算，以下均为一维展平的矩阵操作（行优先存储）。
+
+  /** 生成 n×n 对角矩阵，对角线元素为 c */
   krigingMatrixDiag = (c: number, n: number) => {
     const Z = this.createArrayWithValues(0, n * n)
     for (let i = 0; i < n; i++) Z[i * n + i] = c
     return Z
   };
 
+  /** 矩阵转置：n×m → m×n */
   krigingMatrixTranspose = (X: number[], n: number, m: number) => {
     let i
     let j
@@ -155,11 +214,13 @@ export default class KrigingClass {
     return Z
   };
 
+  /** 矩阵标量乘法：X 的每个元素乘以 c（原地修改） */
   krigingMatrixScale = (X: number[], c: number, n: number, m: number) => {
     let i, j
     for (i = 0; i < n; i++) for (j = 0; j < m; j++) X[i * m + j] *= c
   };
 
+  /** 矩阵加法：Z = X + Y */
   krigingMatrixAdd = (X: number[], Y: number[], n: number, m: number) => {
     let i
     let j
@@ -170,7 +231,7 @@ export default class KrigingClass {
     return Z
   };
 
-  // Naive matrix multiplication(朴素矩阵乘法)
+  /** 矩阵乘法（朴素 O(n·m·p)）：Z(n×p) = X(n×m) · Y(m×p) */
   krigingMatrixMultiply = (
     X: number[],
     Y: number[],
@@ -191,7 +252,11 @@ export default class KrigingClass {
     return Z
   };
 
-  // Cholesky decomposition(乔里斯基分解)
+  /**
+   * Cholesky 分解（原地）。
+   * 将对称正定矩阵 X 分解为 L·Lᵀ，结果存入 X 的下三角部分。
+   * @returns 分解是否成功（矩阵不正定时返回 false）
+   */
   krigingMatrixChol = (X: number[], n: number) => {
     let i
     let j
@@ -211,7 +276,10 @@ export default class KrigingClass {
     return true
   };
 
-  // Inversion of cholesky decomposition(反演乔里斯基分解)
+  /**
+   * Cholesky 逆矩阵（原地）。
+   * 在 Cholesky 分解之后调用，将 L 变换为 (L·Lᵀ)⁻¹。
+   */
   krigingMatrixChol2invl = (X: number[], n: number) => {
     let i, j, k, sum
     for (i = 0; i < n; i++) {
@@ -233,7 +301,10 @@ export default class KrigingClass {
     for (i = 0; i < n; i++) for (j = 0; j < i; j++) X[i * n + j] = X[j * n + i]
   };
 
-  // Inversion via gauss-jordan elimination(反演高斯－若尔当消元法)
+  /**
+   * Gauss-Jordan 消元法求逆矩阵（原地），作为 Cholesky 分解失败时的备选方案。
+   * @returns 是否成功（矩阵奇异时返回 false）
+   */
   krigingMatrixSolve = (X: number[], n: number) => {
     const m = n
     const b = Array(n * n)
@@ -288,7 +359,7 @@ export default class KrigingClass {
       indxr[i] = irow
       indxc[i] = icol
 
-      if (X[icol * n + icol] === 0) return false // Singular
+      if (X[icol * n + icol] === 0) return false
 
       pivinv = 1 / X[icol * n + icol]
       X[icol * n + icol] = 1
@@ -317,7 +388,25 @@ export default class KrigingClass {
     return true
   };
 
-  // Train using gaussian processes with bayesian priors(使用高斯过程和贝叶斯先验进行训练)
+  // ==================== 训练 ====================
+
+  /**
+   * 训练变差函数模型（贝叶斯先验高斯过程）。
+   *
+   * 步骤：
+   *   1. 计算所有点对的距离和半方差
+   *   2. 分箱统计，得到实验变差函数
+   *   3. 最小二乘法拟合理论变差函数的 nugget 和 sill
+   *   4. 构建 Gram 矩阵并求逆，得到预测权重 M
+   *
+   * @param t      观测值数组
+   * @param x      X 坐标（经度）数组
+   * @param y      Y 坐标（纬度）数组
+   * @param model  变差函数模型类型：'gaussian' | 'exponential' | 'spherical'
+   * @param sigma2 噪声方差（正则化项，防止 Gram 矩阵奇异）
+   * @param alpha  先验精度（越大表示越信任数据，越小表示越信任先验）
+   * @returns      拟合好的 VariogramClass 实例
+   */
   train = (
     t: Array<number>,
     x: Array<number>,
@@ -328,7 +417,7 @@ export default class KrigingClass {
   ) => {
     const variogram = new VariogramClass(t, x, y, model)
 
-    // Lag distance/semivariance
+    // 计算所有点对的欧氏距离和观测值之差（半方差的原始数据）
     let i
     let j
     let k
@@ -350,7 +439,7 @@ export default class KrigingClass {
     })
     variogram.range = distance[(n * n - n) / 2 - 1][0]
 
-    // Bin lag distance
+    // 分箱统计：将距离分为 lags 个区间，计算每个区间的平均距离和平均半方差
     const lags = (n * n - n) / 2 > 30 ? 30 : (n * n - n) / 2
     const tolerance = variogram.range / lags
     const lag = this.createArrayWithValues(0, lags)
@@ -379,10 +468,10 @@ export default class KrigingClass {
           l++
         }
       }
-      if (l < 2) return variogram // Error: Not enough points
+      if (l < 2) return variogram
     }
 
-    // Feature transformation
+    // 特征变换：将分箱后的 lag 映射到变差函数模型的特征空间
     n = l
     variogram.range = lag[n - 1] - lag[0]
     const X = this.createArrayWithValues(1, 2 * n)
@@ -407,7 +496,7 @@ export default class KrigingClass {
       Y[i] = semi[i]
     }
 
-    // Least squares
+    // 最小二乘法拟合 nugget 和 sill：W = (XᵀX + λI)⁻¹ · Xᵀ · Y
     const Xt = this.krigingMatrixTranspose(X, n, 2)
     let Z = this.krigingMatrixMultiply(Xt, X, 2, n, 2)
     Z = this.krigingMatrixAdd(Z, this.krigingMatrixDiag(1 / alpha, 2), 2, 2)
@@ -425,12 +514,12 @@ export default class KrigingClass {
       1
     )
 
-    // Variogram parameters
+    // 从最小二乘解中提取变差函数参数
     variogram.nugget = W[0]
     variogram.sill = W[1] * variogram.range + variogram.nugget
     variogram.n = x.length
 
-    // Gram matrix with prior
+    // 构建 Gram 矩阵 K：K[i,j] = γ(d(i,j))，即所有观测点对之间的变差函数值
     n = x.length
     let K = Array(n * n)
     for (i = 0; i < n; i++) {
@@ -453,7 +542,7 @@ export default class KrigingClass {
       )
     }
 
-    // Inverse penalized Gram matrix projected to target vector
+    // 加正则化项后求逆：C = (K + σ²I)⁻¹，再计算预测权重 M = C · t
     let C = this.krigingMatrixAdd(K, this.krigingMatrixDiag(sigma2, n), n, n)
     const cloneC = C.slice(0)
     if (this.krigingMatrixChol(C, n)) this.krigingMatrixChol2invl(C, n)
@@ -462,7 +551,6 @@ export default class KrigingClass {
       C = cloneC
     }
 
-    // Copy unprojected inverted matrix as K
     K = C.slice(0)
     const M = this.krigingMatrixMultiply(C, t, n, n, 1)
     variogram.K = K
@@ -471,7 +559,12 @@ export default class KrigingClass {
     return variogram
   };
 
-  // Model prediction(模型预测)
+  // ==================== 预测 ====================
+
+  /**
+   * 对单点 (x, y) 进行克里金预测。
+   * 计算该点与所有观测点的变差函数值，再与权重 M 做内积。
+   */
   predict = (x: number, y: number, variogram: VariogramClass) => {
     let i
     const k = Array(variogram.n)
@@ -490,6 +583,10 @@ export default class KrigingClass {
     return this.krigingMatrixMultiply(k, variogram.M, 1, variogram.n, 1)[0]
   };
 
+  /**
+   * 计算单点 (x, y) 的预测方差（用于评估预测不确定性）。
+   * variance = γ(0) + kᵀ · K⁻¹ · k
+   */
   variance = (x: number, y: number, variogram: VariogramClass) => {
     let i
     const k = Array(variogram.n)
@@ -523,7 +620,20 @@ export default class KrigingClass {
     )
   };
 
-  // Gridded matrices or contour paths(网格矩阵或轮廓路径)
+  // ==================== 网格生成 ====================
+
+  /**
+   * 标准网格生成（射线法 PIP）。
+   *
+   * 在 polygons 覆盖的范围内按 width 步长划分格网，
+   * 对每个格网点用射线法（Array.prototype.pip）判断是否在多边形内部，
+   * 在内部的点调用 predict() 计算预测值。
+   *
+   * @param polygons  多边形数组，每个多边形为 [[x,y], ...] 形式的顶点环
+   * @param variogram train() 返回的变差函数对象
+   * @param width     格网步长（单位与坐标一致，越小精度越高但计算量越大）
+   * @returns         IGrid 网格结果
+   */
   grid = (
     polygons: Array<Array<Array<number>>>,
     variogram: VariogramClass,
@@ -535,16 +645,11 @@ export default class KrigingClass {
     const n = polygons.length
     if (n === 0) return
 
-    // Boundaries of polygons space
+    // 计算所有多边形的全局包围盒
     const xlim = [polygons[0][0][0], polygons[0][0][0]]
     const ylim = [polygons[0][0][1], polygons[0][0][1]]
-    for (
-      i = 0;
-      i < n;
-      i++ // Polygons
-    ) {
+    for (i = 0; i < n; i++) {
       for (j = 0; j < polygons[i].length; j++) {
-        // Vertices
         if (polygons[i][j][0] < xlim[0]) xlim[0] = polygons[i][j][0]
         if (polygons[i][j][0] > xlim[1]) xlim[1] = polygons[i][j][0]
         if (polygons[i][j][1] < ylim[0]) ylim[0] = polygons[i][j][1]
@@ -552,12 +657,12 @@ export default class KrigingClass {
       }
     }
 
-    // Alloc for O(n^2) space
+    // 分配格网二维数组
     let xtarget, ytarget
     const a = Array(2)
     const b = Array(2)
-    const lxlim = Array(2) // Local dimensions
-    const lylim = Array(2) // Local dimensions
+    const lxlim = Array(2)
+    const lylim = Array(2)
     const x = Math.ceil((xlim[1] - xlim[0]) / width)
     const y = Math.ceil((ylim[1] - ylim[0]) / width)
 
@@ -569,21 +674,22 @@ export default class KrigingClass {
       width: 0
     }
     for (i = 0; i <= x; i++) A.list[i] = Array(y + 1)
+
+    // 逐个多边形处理
     for (i = 0; i < n; i++) {
-      // Range for polygons[i]
+      // 计算当前多边形的局部包围盒
       lxlim[0] = polygons[i][0][0]
       lxlim[1] = lxlim[0]
       lylim[0] = polygons[i][0][1]
       lylim[1] = lylim[0]
       for (j = 1; j < polygons[i].length; j++) {
-        // Vertices
         if (polygons[i][j][0] < lxlim[0]) lxlim[0] = polygons[i][j][0]
         if (polygons[i][j][0] > lxlim[1]) lxlim[1] = polygons[i][j][0]
         if (polygons[i][j][1] < lylim[0]) lylim[0] = polygons[i][j][1]
         if (polygons[i][j][1] > lylim[1]) lylim[1] = polygons[i][j][1]
       }
 
-      // Loop through polygon subspace
+      // 将局部包围盒映射到格网索引范围
       a[0] = Math.floor(
         (lxlim[0] - ((lxlim[0] - xlim[0]) % width) - xlim[0]) / width
       )
@@ -596,6 +702,8 @@ export default class KrigingClass {
       b[1] = Math.ceil(
         (lylim[1] - ((lylim[1] - ylim[1]) % width) - ylim[0]) / width
       )
+
+      // 遍历格网，射线法判定 + 预测
       for (j = a[0]; j <= a[1]; j++) {
         for (k = b[0]; k <= b[1]; k++) {
           xtarget = xlim[0] + j * width
@@ -612,9 +720,175 @@ export default class KrigingClass {
     A.width = width
     return A
   };
-  // contour =  (value, polygons, variogram) => {};
 
-  // Plotting on the DOM(在DOM上绘图)
+  // ==================== 位图加速 PIP ====================
+
+  /**
+   * 创建位图点-in-多边形查询函数。
+   *
+   * 原理：将多边形光栅化到一张离屏 Canvas 上（黑色填充多边形，绿色填充背景），
+   * 然后读取像素数据缓存到 Uint8ClampedArray 中。
+   * 查询时直接通过像素坐标索引读取 RGBA 值，O(1) 时间判定。
+   *
+   * 相比射线法（每次查询 O(v)，v 为多边形顶点数），
+   * 位图法在大量格网点查询场景下有显著性能优势。
+   *
+   * @param width   位图宽度（像素），应覆盖格网 X 方向的索引范围
+   * @param height  位图高度（像素），应覆盖格网 Y 方向的索引范围
+   * @param polygon 多边形顶点，已转换为格网索引坐标 [[col, row], ...]
+   * @returns       查询函数 (col, row) => boolean
+   */
+  private createBitmapPip = (width: number, height: number, polygon: number[][]) => {
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')!
+
+    // 背景填充绿色（非多边形区域标记）
+    ctx.fillStyle = 'rgba(0, 255, 0, 255)'
+    ctx.fillRect(0, 0, width, height)
+
+    // 绘制多边形路径并填充黑色（多边形内部标记）
+    ctx.beginPath()
+    for (let i = 0; i < polygon.length; i++) {
+      const [x, y] = polygon[i]
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    }
+    ctx.closePath()
+    ctx.fillStyle = 'rgba(0, 0, 0, 255)'
+    ctx.fill()
+
+    // 一次性读取所有像素数据到内存，后续查询零 DOM 访问
+    const imgData = ctx.getImageData(0, 0, width, height)
+    const w = imgData.width
+    const h = imgData.height
+    const pixels = imgData.data
+
+    return (x: number, y: number): boolean => {
+      const tx = Math.round(x < 0 ? 0 : x >= w ? w - 1 : x)
+      const ty = Math.round(y < 0 ? 0 : y >= h ? h - 1 : y)
+      const idx = (w * ty + tx) * 4
+      return pixels[idx] === 0 && pixels[idx + 1] === 0 && pixels[idx + 2] === 0 && pixels[idx + 3] === 255
+    }
+  };
+
+  /**
+   * 光栅化加速网格生成（位图法 PIP）。
+   *
+   * 逻辑与 grid() 完全一致，唯一区别：
+   *   - grid() 对每个格网点调用射线法 pip()（O(v)/次）
+   *   - rasterGrid() 先将多边形光栅化为位图，再用 O(1) 像素查询替代
+   *
+   * 当格网点数量远大于多边形顶点数时，性能提升显著。
+   *
+   * @param polygons  多边形数组
+   * @param variogram train() 返回的变差函数对象
+   * @param width     格网步长
+   * @returns         IGrid 网格结果（与 grid() 返回格式一致）
+   */
+  rasterGrid = (
+    polygons: Array<Array<Array<number>>>,
+    variogram: VariogramClass,
+    width: number
+  ) => {
+    let i
+    let j
+    let k
+    const n = polygons.length
+    if (n === 0) return
+
+    const xlim = [polygons[0][0][0], polygons[0][0][0]]
+    const ylim = [polygons[0][0][1], polygons[0][0][1]]
+    for (i = 0; i < n; i++) {
+      for (j = 0; j < polygons[i].length; j++) {
+        if (polygons[i][j][0] < xlim[0]) xlim[0] = polygons[i][j][0]
+        if (polygons[i][j][0] > xlim[1]) xlim[1] = polygons[i][j][0]
+        if (polygons[i][j][1] < ylim[0]) ylim[0] = polygons[i][j][1]
+        if (polygons[i][j][1] > ylim[1]) ylim[1] = polygons[i][j][1]
+      }
+    }
+
+    let xtarget, ytarget
+    const a = Array(2)
+    const b = Array(2)
+    const lxlim = Array(2)
+    const lylim = Array(2)
+    const x = Math.ceil((xlim[1] - xlim[0]) / width)
+    const y = Math.ceil((ylim[1] - ylim[0]) / width)
+
+    const A: IGrid = {
+      list: Array(x + 1),
+      xlim: Array<number>(2),
+      ylim: Array<number>(2),
+      zlim: Array<number>(2),
+      width: 0
+    }
+    for (i = 0; i <= x; i++) A.list[i] = Array(y + 1)
+    for (i = 0; i < n; i++) {
+      lxlim[0] = polygons[i][0][0]
+      lxlim[1] = lxlim[0]
+      lylim[0] = polygons[i][0][1]
+      lylim[1] = lylim[0]
+      for (j = 1; j < polygons[i].length; j++) {
+        if (polygons[i][j][0] < lxlim[0]) lxlim[0] = polygons[i][j][0]
+        if (polygons[i][j][0] > lxlim[1]) lxlim[1] = polygons[i][j][0]
+        if (polygons[i][j][1] < lylim[0]) lylim[0] = polygons[i][j][1]
+        if (polygons[i][j][1] > lylim[1]) lylim[1] = polygons[i][j][1]
+      }
+
+      a[0] = Math.floor(
+        (lxlim[0] - ((lxlim[0] - xlim[0]) % width) - xlim[0]) / width
+      )
+      a[1] = Math.ceil(
+        (lxlim[1] - ((lxlim[1] - xlim[1]) % width) - xlim[0]) / width
+      )
+      b[0] = Math.floor(
+        (lylim[0] - ((lylim[0] - ylim[0]) % width) - ylim[0]) / width
+      )
+      b[1] = Math.ceil(
+        (lylim[1] - ((lylim[1] - ylim[1]) % width) - ylim[0]) / width
+      )
+
+      // 将多边形地理坐标转换为格网索引坐标，构建位图 PIP 查询器
+      const transPolygon = polygons[i].map(([px, py]) => [
+        Math.floor((px - xlim[0]) / width),
+        Math.floor((py - ylim[0]) / width)
+      ])
+      const bitmapPip = this.createBitmapPip(a[1] + 1, b[1] + 1, transPolygon)
+
+      // 遍历格网，位图 O(1) 判定 + 预测
+      for (j = a[0]; j <= a[1]; j++) {
+        for (k = b[0]; k <= b[1]; k++) {
+          xtarget = xlim[0] + j * width
+          ytarget = ylim[0] + k * width
+          if (bitmapPip(j, k)) {
+            A.list[j][k] = this.predict(xtarget, ytarget, variogram)
+          }
+        }
+      }
+    }
+    A.xlim = xlim
+    A.ylim = ylim
+    A.zlim = [variogram.t.min(), variogram.t.max()]
+    A.width = width
+    return A
+  };
+
+  // ==================== 渲染 ====================
+
+  /**
+   * 将网格预测结果渲染到 Canvas 画布上。
+   *
+   * 遍历 grid 的每个有值单元，根据其预测值查找对应颜色，
+   * 在画布对应位置绘制一个矩形色块。
+   *
+   * @param canvas 目标画布
+   * @param grid   grid() 或 rasterGrid() 返回的网格数据
+   * @param xlim   X 轴显示范围 [min, max]
+   * @param ylim   Y 轴显示范围 [min, max]
+   * @param colors 色阶映射数组
+   */
   plot = (
     canvas: HTMLCanvasElement,
     grid: IGrid,
@@ -622,10 +896,8 @@ export default class KrigingClass {
     ylim: Array<number>,
     colors: Array<IColor>
   ) => {
-    // Clear screen
     const ctx = canvas.getContext('2d')
     ctx && ctx.clearRect(0, 0, canvas.width, canvas.height)
-    // Starting boundaries
     const range = [
       xlim[1] - xlim[0],
       ylim[1] - ylim[0],
@@ -634,11 +906,13 @@ export default class KrigingClass {
     let i, j, x, y, z
     const n = grid.list.length
     const m = grid.list[0].length
+    // 每个格网单元在画布上的像素尺寸
     const wx = Math.ceil((grid.width * canvas.width) / (xlim[1] - xlim[0]))
     const wy = Math.ceil((grid.width * canvas.height) / (ylim[1] - ylim[0]))
     for (i = 0; i < n; i++) {
       for (j = 0; j < m; j++) {
         if (grid.list[i][j] === undefined) continue
+        // 将格网索引映射到画布像素坐标
         x =
           (canvas.width * (i * grid.width + grid.xlim[0] - xlim[0])) / range[0]
         y =
@@ -656,7 +930,10 @@ export default class KrigingClass {
     }
   };
 
-  // custom color(自定义色彩)
+  /**
+   * 根据原始值 z 在色阶表中查找对应颜色。
+   * 线性扫描 colors 数组，返回第一个满足 min <= z < max 的 color 值。
+   */
   getColor = (colors: Array<IColor>, z: number) => {
     const l = colors.length
     for (let i = 0; i < l; i++) {
