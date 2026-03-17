@@ -37,7 +37,7 @@ export const init = async (element: HTMLDivElement) => {
   const kriging = new KrigingClass()
 
   const { data: pointData } = await axios.get(
-    `${import.meta.env.VITE_BASE_URL}/cezhan.json`
+    `${import.meta.env.BASE_URL}cezhan.json`
   )
   const lngs: number[] = []
   const lats: number[] = []
@@ -49,7 +49,7 @@ export const init = async (element: HTMLDivElement) => {
   })
 
   const { data: areaData } = await axios.get(
-    `${import.meta.env.VITE_BASE_URL}/tianjin_line_1.json`
+    `${import.meta.env.BASE_URL}tianjin_line_1.json`
   )
   const coords: number[] = []
   areaData.features[0].geometry.coordinates.forEach((item: any) => {
