@@ -23,7 +23,7 @@
     "src/**/*.vue",
     "KrigingDemo/**/*.ts",
     "KrigingDemo/**/*.vue",
-    "kriging.ts",
+    "src/plugins/kriging.ts",
     "global.d.ts"
   ],
   "references": [{ "path": "./tsconfig.node.json" }]
