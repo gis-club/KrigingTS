@@ -1,5 +1,5 @@
 import * as Cesium from 'cesium'
-import KrigingClass from '../kriging'
+import KrigingClass from '../src/plugins/kriging'
 import axios from 'axios'
 import GUI from 'lil-gui'
 
